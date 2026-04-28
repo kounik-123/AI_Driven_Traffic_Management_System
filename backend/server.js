@@ -5,14 +5,18 @@ import { Server } from "socket.io";
 
 const app = express();
 const server = http.createServer(app);
+
+const PORT = process.env.PORT || 4000;
+const FRONTEND_URL = process.env.FRONTEND_URL || "http://localhost:5173";
+app.set("trust proxy", 1);
+
 const io = new Server(server, {
   cors: {
-    origin: "http://localhost:5173",
+    origin: FRONTEND_URL,
     methods: ["GET", "POST"],
   },
 });
 
-const PORT = 4000;
 const UPDATE_INTERVAL_MS = 1000;
 const DECISION_INTERVAL_MS = 4000;
 const MIN_SWITCH_DELAY_MS = 3000;
@@ -29,28 +33,36 @@ let lastSwitchTime = Date.now();
 const CYCLE_ORDER = ["north", "south", "east", "west"];
 let currentIdx = 0;
 
-app.use(cors());
+app.use(cors({ origin: FRONTEND_URL }));
 app.use(express.json());
+
+app.get("/", (_req, res) => {
+  res.send("Backend is running 🚀");
+});
 
 app.get("/traffic-data", (_req, res) => {
   res.json(trafficState);
 });
 
 io.on("connection", (socket) => {
+  console.log("Client connected");
+
   socket.emit("traffic:update", trafficState);
 
   socket.on("traffic:counts", (counts) => {
     if (!counts || typeof counts !== "object") return;
 
-    const nextNorth = Number(counts.north);
-    const nextSouth = Number(counts.south);
-    const nextEast = Number(counts.east);
-    const nextWest = Number(counts.west);
+    const sanitize = (v, fallback) =>
+      Number.isFinite(Number(v)) ? Math.max(0, Math.floor(Number(v))) : fallback;
 
-    trafficState.north = Number.isFinite(nextNorth) ? Math.max(0, Math.floor(nextNorth)) : trafficState.north;
-    trafficState.south = Number.isFinite(nextSouth) ? Math.max(0, Math.floor(nextSouth)) : trafficState.south;
-    trafficState.east = Number.isFinite(nextEast) ? Math.max(0, Math.floor(nextEast)) : trafficState.east;
-    trafficState.west = Number.isFinite(nextWest) ? Math.max(0, Math.floor(nextWest)) : trafficState.west;
+    trafficState.north = sanitize(counts.north, trafficState.north);
+    trafficState.south = sanitize(counts.south, trafficState.south);
+    trafficState.east = sanitize(counts.east, trafficState.east);
+    trafficState.west = sanitize(counts.west, trafficState.west);
+  });
+
+  socket.on("disconnect", () => {
+    console.log("Client disconnected");
   });
 });
 
@@ -69,5 +81,5 @@ setInterval(() => {
 }, DECISION_INTERVAL_MS);
 
 server.listen(PORT, () => {
-  console.log(`Backend running at http://localhost:${PORT}`);
+  console.log(`Backend running on port ${PORT}`);
 });
