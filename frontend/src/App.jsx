@@ -31,6 +31,12 @@ const SPAWN_POINTS = {
 };
 
 const DIRECTIONS = ["north", "south", "east", "west"];
+const LANE_OFFSETS = {
+  north: [1.8, 4.8],
+  south: [-1.8, -4.8],
+  east: [-1.8, -4.8],
+  west: [1.8, 4.8],
+};
 const CAR_COLORS = [0xff3b30, 0x007aff, 0xffcc00, 0x34c759, 0xaf52de, 0xff9500];
 const SPAWN_MIN_MS = 1000;
 const SPAWN_MAX_MS = 2000;
@@ -39,7 +45,7 @@ const ACCELERATION = 8.5;
 const DECELERATION = 12.5;
 const SPAWN_GAP = 10;
 const STOP_LINE_HOLD_GAP = 0.25;
-const FOLLOW_BUFFER_GAP = 0.5;
+const STRICT_FOLLOW_GAP = MIN_GAP;
 const BASE_GREEN_SECONDS = 8;
 const PER_CAR_GREEN_SECONDS = 1.2;
 const MIN_GREEN_SECONDS = 10;
@@ -344,19 +350,36 @@ function DetectionDemoPanel({ direction }) {
     const animatePanel = () => {
       rafId = requestAnimationFrame(animatePanel);
       const dt = Math.min(clock.getDelta(), 0.045);
+      const laneGroups = new Map();
+      vehicles.forEach((vehicle) => {
+        const laneKey = vehicle.mesh.position.x.toFixed(2);
+        if (!laneGroups.has(laneKey)) laneGroups.set(laneKey, []);
+        laneGroups.get(laneKey).push(vehicle);
+      });
+
+      laneGroups.forEach((laneVehicles) => {
+        laneVehicles.sort((a, b) => b.mesh.position.z - a.mesh.position.z);
+        laneVehicles.forEach((vehicle, index) => {
+          const leader = index > 0 ? laneVehicles[index - 1] : null;
+          vehicle.prevZ = vehicle.mesh.position.z;
+          let nextZ = vehicle.mesh.position.z + vehicle.speed * dt;
+          if (leader) {
+            nextZ = Math.min(nextZ, leader.mesh.position.z - STRICT_FOLLOW_GAP);
+          }
+          vehicle.mesh.position.z = nextZ;
+          vehicle.mesh.lookAt(new THREE.Vector3(vehicle.mesh.position.x, 0, vehicle.mesh.position.z + 3));
+          vehicle.box.update();
+          vehicle.label.position.set(vehicle.mesh.position.x, 4.2, vehicle.mesh.position.z);
+
+          if (!vehicle.counted && vehicle.prevZ < detectionLineZ && vehicle.mesh.position.z >= detectionLineZ) {
+            vehicle.counted = true;
+            setVehicleCount((prev) => prev + 1);
+          }
+        });
+      });
+
       for (let i = vehicles.length - 1; i >= 0; i -= 1) {
         const vehicle = vehicles[i];
-        vehicle.prevZ = vehicle.mesh.position.z;
-        vehicle.mesh.position.z += vehicle.speed * dt;
-        vehicle.mesh.lookAt(new THREE.Vector3(vehicle.mesh.position.x, 0, vehicle.mesh.position.z + 3));
-        vehicle.box.update();
-        vehicle.label.position.set(vehicle.mesh.position.x, 4.2, vehicle.mesh.position.z);
-
-        if (!vehicle.counted && vehicle.prevZ < detectionLineZ && vehicle.mesh.position.z >= detectionLineZ) {
-          vehicle.counted = true;
-          setVehicleCount((prev) => prev + 1);
-        }
-
         if (vehicle.mesh.position.z > 48) {
           scene.remove(vehicle.mesh);
           scene.remove(vehicle.box);
@@ -1713,70 +1736,75 @@ function App() {
       isPedestrianCrossingRef.current = hasCrossing;
     };
 
-    const getVehiclePath = (direction, intention) => {
+    const getVehiclePath = (direction, intention, laneOffset) => {
       const spawn = SPAWN_POINTS[direction];
       const stopLine = STOP_LINE;
       const exit = BOUNDS + 10;
       const path = new THREE.CurvePath();
 
-      const p0 = new THREE.Vector3(spawn.x, 0, spawn.z);
+      // Adjust start point based on lane offset
+      const p0 = new THREE.Vector3(
+        direction === "north" || direction === "south" ? laneOffset : spawn.x,
+        0,
+        direction === "east" || direction === "west" ? laneOffset : spawn.z
+      );
       let p1, p2, p3, p4;
 
       if (direction === "north") {
-        p1 = new THREE.Vector3(3, 0, -stopLine);
+        p1 = new THREE.Vector3(laneOffset, 0, -stopLine);
         if (intention === "STRAIGHT") {
-          p2 = new THREE.Vector3(3, 0, stopLine);
-          p3 = new THREE.Vector3(3, 0, exit);
+          p2 = new THREE.Vector3(laneOffset, 0, stopLine);
+          p3 = new THREE.Vector3(laneOffset, 0, exit);
         } else if (intention === "LEFT") {
-          p2 = new THREE.Vector3(3, 0, -3); // Control point
-          p3 = new THREE.Vector3(6, 0, -3);
-          p4 = new THREE.Vector3(exit, 0, -3);
+          p2 = new THREE.Vector3(laneOffset, 0, -laneOffset);
+          p3 = new THREE.Vector3(6, 0, -laneOffset);
+          p4 = new THREE.Vector3(exit, 0, -laneOffset);
         } else if (intention === "RIGHT") {
-          p2 = new THREE.Vector3(3, 0, 3); // Control point
-          p3 = new THREE.Vector3(-6, 0, 3);
-          p4 = new THREE.Vector3(-exit, 0, 3);
+          p2 = new THREE.Vector3(laneOffset, 0, laneOffset);
+          p3 = new THREE.Vector3(-6, 0, laneOffset);
+          p4 = new THREE.Vector3(-exit, 0, laneOffset);
         }
       } else if (direction === "south") {
-        p1 = new THREE.Vector3(-3, 0, stopLine);
+        p1 = new THREE.Vector3(laneOffset, 0, stopLine);
         if (intention === "STRAIGHT") {
-          p2 = new THREE.Vector3(-3, 0, -stopLine);
-          p3 = new THREE.Vector3(-3, 0, -exit);
+          p2 = new THREE.Vector3(laneOffset, 0, -stopLine);
+          p3 = new THREE.Vector3(laneOffset, 0, -exit);
         } else if (intention === "LEFT") {
-          p2 = new THREE.Vector3(-3, 0, 3);
-          p3 = new THREE.Vector3(-6, 0, 3);
-          p4 = new THREE.Vector3(-exit, 0, 3);
+          p2 = new THREE.Vector3(laneOffset, 0, -laneOffset);
+          p3 = new THREE.Vector3(-6, 0, -laneOffset);
+          p4 = new THREE.Vector3(-exit, 0, -laneOffset);
         } else if (intention === "RIGHT") {
-          p2 = new THREE.Vector3(-3, 0, -3);
-          p3 = new THREE.Vector3(6, 0, -3);
-          p4 = new THREE.Vector3(exit, 0, -3);
+          p2 = new THREE.Vector3(laneOffset, 0, laneOffset);
+          p3 = new THREE.Vector3(6, 0, laneOffset);
+          p4 = new THREE.Vector3(exit, 0, laneOffset);
         }
       } else if (direction === "east") {
-        p1 = new THREE.Vector3(-stopLine, 0, -3);
+        p1 = new THREE.Vector3(-stopLine, 0, laneOffset);
         if (intention === "STRAIGHT") {
-          p2 = new THREE.Vector3(stopLine, 0, -3);
-          p3 = new THREE.Vector3(exit, 0, -3);
+          p2 = new THREE.Vector3(stopLine, 0, laneOffset);
+          p3 = new THREE.Vector3(exit, 0, laneOffset);
         } else if (intention === "LEFT") {
-          p2 = new THREE.Vector3(-3, 0, -3);
-          p3 = new THREE.Vector3(-3, 0, -6);
-          p4 = new THREE.Vector3(-3, 0, -exit);
+          p2 = new THREE.Vector3(laneOffset, 0, laneOffset);
+          p3 = new THREE.Vector3(laneOffset, 0, -6);
+          p4 = new THREE.Vector3(laneOffset, 0, -exit);
         } else if (intention === "RIGHT") {
-          p2 = new THREE.Vector3(3, 0, -3);
-          p3 = new THREE.Vector3(3, 0, 6);
-          p4 = new THREE.Vector3(3, 0, exit);
+          p2 = new THREE.Vector3(-laneOffset, 0, laneOffset);
+          p3 = new THREE.Vector3(-laneOffset, 0, 6);
+          p4 = new THREE.Vector3(-laneOffset, 0, exit);
         }
       } else if (direction === "west") {
-        p1 = new THREE.Vector3(stopLine, 0, 3);
+        p1 = new THREE.Vector3(stopLine, 0, laneOffset);
         if (intention === "STRAIGHT") {
-          p2 = new THREE.Vector3(-stopLine, 0, 3);
-          p3 = new THREE.Vector3(-exit, 0, 3);
+          p2 = new THREE.Vector3(-stopLine, 0, laneOffset);
+          p3 = new THREE.Vector3(-exit, 0, laneOffset);
         } else if (intention === "LEFT") {
-          p2 = new THREE.Vector3(3, 0, 3);
-          p3 = new THREE.Vector3(3, 0, 6);
-          p4 = new THREE.Vector3(3, 0, exit);
+          p2 = new THREE.Vector3(laneOffset, 0, laneOffset);
+          p3 = new THREE.Vector3(laneOffset, 0, 6);
+          p4 = new THREE.Vector3(laneOffset, 0, exit);
         } else if (intention === "RIGHT") {
-          p2 = new THREE.Vector3(-3, 0, 3);
-          p3 = new THREE.Vector3(-3, 0, -6);
-          p4 = new THREE.Vector3(-3, 0, -exit);
+          p2 = new THREE.Vector3(-laneOffset, 0, laneOffset);
+          p3 = new THREE.Vector3(-laneOffset, 0, -6);
+          p4 = new THREE.Vector3(-laneOffset, 0, -exit);
         }
       }
 
@@ -1806,6 +1834,9 @@ function App() {
     const createCar = (direction) => {
       if (carsRef.current.length >= MAX_CARS) return;
 
+      const laneId = Math.floor(Math.random() * LANE_OFFSETS[direction].length);
+      const laneOffset = LANE_OFFSETS[direction][laneId];
+
       const shouldSpawnAmbulance =
         !emergencyActiveRef.current && Math.random() < AMBULANCE_SPAWN_PROBABILITY;
       const vehicleTypes = ["car", "car", "car", "truck", "bus", "bicycle", "bicycle", "motorbike", "motorbike"];
@@ -1825,9 +1856,9 @@ function App() {
                 ? 2.4
                 : 4.5;
 
-      // Strict lane spawn spacing: never create a car too close to one ahead.
+      // Strict lane spawn spacing: only check SAME lane
       const isSpawnBlocked = carsRef.current.some((car) => {
-        if (car.direction !== direction) return false;
+        if (car.direction !== direction || car.laneId !== laneId) return false;
         // Only consider cars that haven't cleared the spawn area
         const gapAhead = car.distanceTravelled - (car.length + length) / 2;
         return gapAhead >= 0 && gapAhead < SPAWN_GAP;
@@ -1837,7 +1868,7 @@ function App() {
 
       const color = shouldSpawnAmbulance ? 0xffffff : CAR_COLORS[Math.floor(Math.random() * CAR_COLORS.length)];
       const intention = shouldSpawnAmbulance ? "STRAIGHT" : getRandomIntention();
-      const path = getVehiclePath(direction, intention);
+      const path = getVehiclePath(direction, intention, laneOffset);
 
       const mesh = createVehicleMesh(type, color);
       const startPos = path.getPoint(0);
@@ -1853,6 +1884,8 @@ function App() {
       carsRef.current.push({
         id: createdCarId,
         direction,
+        laneId,
+        laneOffset,
         intention,
         path,
         distanceTravelled: 0,
@@ -2033,7 +2066,15 @@ function App() {
           : null;
 
       cars.forEach((car, index) => {
-        const leader = index > 0 ? cars[index - 1] : null;
+        // Find the leader in the same lane
+        let leader = null;
+        for (let i = index - 1; i >= 0; i--) {
+          if (cars[i].laneId === car.laneId) {
+            leader = cars[i];
+            break;
+          }
+        }
+
         const frontProgress = getFrontProgress(car);
         const distanceToStop = distanceToStopLine(car);
         const stopLineFrontProgress = getStopLineFrontProgress(car);
@@ -2081,11 +2122,11 @@ function App() {
         // Leader Following Logic
         if (leader) {
           const gap = directionalGap(leader, car);
-          if (gap < FOLLOW_BUFFER_GAP) {
-            const followerTargetSpeed = Math.max(0, leader.speed * (gap / FOLLOW_BUFFER_GAP));
+          if (gap < STRICT_FOLLOW_GAP) {
+            const followerTargetSpeed = Math.max(0, leader.speed * (gap / STRICT_FOLLOW_GAP));
             if (followerTargetSpeed < targetSpeed) {
               targetSpeed = followerTargetSpeed;
-              if (targetSpeed < 0.5 && gap < 5) {
+              if (targetSpeed < 0.5) {
                 targetSpeed = 0;
                 carState = "stopped_behind_leader";
               }
@@ -2108,14 +2149,14 @@ function App() {
           newFrontProgress = stopLineFrontProgress - STOP_LINE_HOLD_GAP;
         } else if (carState === "stopped_behind_leader" && leader) {
           const leaderRear = getProgress(leader) - leader.length / 2;
-          newFrontProgress = leaderRear - 4; // Use a fixed small gap when stopped
+          newFrontProgress = leaderRear - STRICT_FOLLOW_GAP;
         } else if (beforeStopLine && !canEnterIntersection && !shouldClearForAmbulance) {
           newFrontProgress = Math.min(newFrontProgress, stopLineFrontProgress - STOP_LINE_HOLD_GAP);
         }
 
         if (leader) {
           const leaderRear = getProgress(leader) - leader.length / 2;
-          newFrontProgress = Math.min(newFrontProgress, leaderRear - 2);
+          newFrontProgress = Math.min(newFrontProgress, leaderRear - STRICT_FOLLOW_GAP);
         }
 
         const prevDistance = car.distanceTravelled;
