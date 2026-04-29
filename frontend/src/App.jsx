@@ -3,7 +3,7 @@ import * as THREE from "three";
 import { io } from "socket.io-client";
 import "./App.css";
 
-const BACKEND_URL = "http://localhost:4000";
+const BACKEND_URL = "https://ai-driven-traffic-management-system.onrender.com";
 const MAX_CARS = 56;
 const MIN_GAP = 3.5;
 const BOUNDS = 55;
