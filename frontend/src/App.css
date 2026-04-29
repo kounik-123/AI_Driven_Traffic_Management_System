@@ -1,11 +1,34 @@
 .app {
+  width: 100%;
+  min-height: 100vh;
+  background: #0f131a;
+  color: #ffffff;
+  font-family: Arial, sans-serif;
+  display: flex;
+  flex-direction: column;
+}
+
+.simulationSection {
   position: relative;
-  width: 100vw;
-  height: 100vh;
+  width: 100%;
+  height: 100%;
   overflow: hidden;
 }
 
+.main-simulation {
+  width: 100%;
+  min-height: 80vh;
+  height: 100vh;
+  position: relative;
+}
+
 .canvasMount {
+  width: 100%;
+  height: 100%;
+}
+
+.canvasMount canvas {
+  display: block;
   width: 100%;
   height: 100%;
 }
@@ -34,4 +57,75 @@
 .overlay p {
   margin: 3px 0;
   font-size: 13px;
+}
+
+.detectionSection {
+  padding: 24px 18px 30px;
+  background: linear-gradient(180deg, #10161f 0%, #0f141c 100%);
+  border-top: 1px solid rgba(255, 255, 255, 0.08);
+}
+
+.detection-demo-section {
+  margin-top: 56px;
+  width: 100%;
+}
+
+.detectionSection h2 {
+  margin: 0 0 14px;
+  font-size: 24px;
+  font-weight: 700;
+  color: #f1f5f9;
+}
+
+.detectionGrid {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(300px, 1fr));
+  gap: 14px;
+}
+
+.detectionPanel {
+  border-radius: 10px;
+  overflow: hidden;
+  border: 1px solid rgba(120, 149, 179, 0.35);
+  background: rgba(13, 20, 30, 0.92);
+  box-shadow: 0 8px 30px rgba(0, 0, 0, 0.35);
+}
+
+.detectionPanelHeader {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 10px;
+  padding: 10px 12px;
+  border-bottom: 1px solid rgba(130, 164, 198, 0.28);
+  background: rgba(22, 32, 45, 0.92);
+}
+
+.detectionPanelHeader h3 {
+  margin: 0;
+  font-size: 16px;
+  font-weight: 700;
+  text-transform: capitalize;
+  color: #d8e9ff;
+}
+
+.detectionPanelHeader span {
+  font-size: 14px;
+  font-weight: 600;
+  color: #ff9472;
+}
+
+.detectionPanelCanvas {
+  width: 100%;
+  height: 230px;
+}
+
+@media (max-width: 640px) {
+  .detectionSection {
+    padding: 20px 12px 24px;
+  }
+
+  .detectionPanelCanvas {
+    height: 200px;
+  }
 }

@@ -3,8 +3,7 @@ import * as THREE from "three";
 import { io } from "socket.io-client";
 import "./App.css";
 
-const BACKEND_URL = import.meta.env.VITE_BACKEND_URL;
-
+const BACKEND_URL = "http://localhost:4000";
 const MAX_CARS = 56;
 const MIN_GAP = 3.5;
 const BOUNDS = 55;
@@ -67,6 +66,344 @@ const normalizeActiveSignal = (signal, fallback = "north") => {
   return fallback;
 };
 
+const DETECTION_PANEL_CONFIG = {
+  north: {
+    lineColor: 0xff4d4f,
+    cameraPosition: new THREE.Vector3(0, 13, 22),
+    cameraLookAt: new THREE.Vector3(0, 0, 4),
+  },
+  south: {
+    lineColor: 0xff6b6b,
+    cameraPosition: new THREE.Vector3(0, 13, 22),
+    cameraLookAt: new THREE.Vector3(0, 0, 4),
+  },
+  east: {
+    lineColor: 0xff7a45,
+    cameraPosition: new THREE.Vector3(0, 13, 22),
+    cameraLookAt: new THREE.Vector3(0, 0, 4),
+  },
+  west: {
+    lineColor: 0xff3d00,
+    cameraPosition: new THREE.Vector3(0, 13, 22),
+    cameraLookAt: new THREE.Vector3(0, 0, 4),
+  },
+};
+
+const createDemoVehicleMesh = (type, color) => {
+  const group = new THREE.Group();
+  const bodyMaterial = new THREE.MeshStandardMaterial({
+    color: color || 0xff0000,
+    emissive: color || 0xff0000,
+    emissiveIntensity: 0.15,
+    roughness: 0.4,
+    metalness: 0.3,
+  });
+  const glassMaterial = new THREE.MeshStandardMaterial({
+    color: 0x111111,
+    roughness: 0.1,
+    metalness: 0.9,
+    transparent: true,
+    opacity: 0.85,
+  });
+  const wheelMaterial = new THREE.MeshStandardMaterial({ color: 0x080808, roughness: 0.95 });
+
+  if (type === "car") {
+    const body = new THREE.Mesh(new THREE.BoxGeometry(2.2, 0.6, 4.2), bodyMaterial);
+    body.position.y = 0.55;
+    body.castShadow = true;
+    group.add(body);
+
+    const cab = new THREE.Mesh(new THREE.BoxGeometry(1.9, 0.65, 2.0), bodyMaterial);
+    cab.position.set(0, 1.15, -0.2);
+    cab.castShadow = true;
+    group.add(cab);
+
+    const frontWin = new THREE.Mesh(new THREE.BoxGeometry(1.8, 0.5, 0.05), glassMaterial);
+    frontWin.position.set(0, 1.15, 0.8);
+    group.add(frontWin);
+
+    const backWin = new THREE.Mesh(new THREE.BoxGeometry(1.8, 0.5, 0.05), glassMaterial);
+    backWin.position.set(0, 1.15, -1.2);
+    group.add(backWin);
+  } else if (type === "bus") {
+    const body = new THREE.Mesh(new THREE.BoxGeometry(2.6, 2.2, 8.2), bodyMaterial);
+    body.position.y = 1.45;
+    body.castShadow = true;
+    group.add(body);
+
+    const winSideL = new THREE.Mesh(new THREE.BoxGeometry(0.05, 0.8, 7.8), glassMaterial);
+    winSideL.position.set(1.3, 1.7, 0);
+    group.add(winSideL);
+
+    const winSideR = new THREE.Mesh(new THREE.BoxGeometry(0.05, 0.8, 7.8), glassMaterial);
+    winSideR.position.set(-1.3, 1.7, 0);
+    group.add(winSideR);
+
+    const winFront = new THREE.Mesh(new THREE.BoxGeometry(2.2, 1.0, 0.05), glassMaterial);
+    winFront.position.set(0, 1.7, 4.1);
+    group.add(winFront);
+  } else if (type === "bicycle") {
+    const frame = new THREE.Mesh(
+      new THREE.BoxGeometry(0.08, 0.08, 2.3),
+      new THREE.MeshStandardMaterial({ color: 0x111827, roughness: 0.7, metalness: 0.25 })
+    );
+    frame.position.set(0, 0.58, 0);
+    frame.castShadow = true;
+    group.add(frame);
+
+    const riderBody = new THREE.Mesh(new THREE.BoxGeometry(0.22, 0.42, 0.16), bodyMaterial);
+    riderBody.position.set(0, 1.06, -0.1);
+    riderBody.castShadow = true;
+    group.add(riderBody);
+  } else {
+    const bikeBody = new THREE.Mesh(
+      new THREE.BoxGeometry(0.5, 0.35, 1.9),
+      new THREE.MeshStandardMaterial({ color: color || 0xef4444, roughness: 0.45, metalness: 0.35 })
+    );
+    bikeBody.position.set(0, 0.65, 0.05);
+    bikeBody.castShadow = true;
+    group.add(bikeBody);
+
+    const riderBody = new THREE.Mesh(new THREE.BoxGeometry(0.24, 0.45, 0.18), bodyMaterial);
+    riderBody.position.set(0, 1.05, -0.02);
+    riderBody.rotation.x = -0.22;
+    riderBody.castShadow = true;
+    group.add(riderBody);
+  }
+
+  const wheelRadius = type === "bicycle" ? 0.33 : type === "motorbike" ? 0.36 : 0.42;
+  const wheelThickness = type === "bicycle" ? 0.12 : type === "motorbike" ? 0.18 : 0.35;
+  const wheelGeom = new THREE.CylinderGeometry(wheelRadius, wheelRadius, wheelThickness, 16);
+  wheelGeom.rotateZ(Math.PI / 2);
+  const wheelPos =
+    type === "bus"
+      ? [[-1.2, wheelRadius, 3], [1.2, wheelRadius, 3], [-1.2, wheelRadius, -3], [1.2, wheelRadius, -3]]
+      : type === "bicycle" || type === "motorbike"
+        ? [[0, wheelRadius, 0.88], [0, wheelRadius, -0.88]]
+        : [[-1.0, wheelRadius, 1.4], [1.0, wheelRadius, 1.4], [-1.0, wheelRadius, -1.4], [1.0, wheelRadius, -1.4]];
+
+  wheelPos.forEach((pos) => {
+    const wheel = new THREE.Mesh(wheelGeom, wheelMaterial);
+    wheel.position.set(...pos);
+    wheel.castShadow = true;
+    group.add(wheel);
+  });
+
+  return group;
+};
+
+const createLabelSprite = (text) => {
+  const canvas = document.createElement("canvas");
+  canvas.width = 128;
+  canvas.height = 48;
+  const ctx = canvas.getContext("2d");
+  ctx.fillStyle = "rgba(8, 12, 20, 0.85)";
+  ctx.fillRect(0, 0, canvas.width, canvas.height);
+  ctx.strokeStyle = "rgba(130, 233, 255, 0.9)";
+  ctx.lineWidth = 2;
+  ctx.strokeRect(1, 1, canvas.width - 2, canvas.height - 2);
+  ctx.fillStyle = "#d7f9ff";
+  ctx.font = "600 22px Arial";
+  ctx.textAlign = "center";
+  ctx.textBaseline = "middle";
+  ctx.fillText(text, canvas.width / 2, canvas.height / 2);
+  const texture = new THREE.CanvasTexture(canvas);
+  texture.colorSpace = THREE.SRGBColorSpace;
+  const material = new THREE.SpriteMaterial({
+    map: texture,
+    transparent: true,
+    depthWrite: false,
+    depthTest: false,
+  });
+  const sprite = new THREE.Sprite(material);
+  sprite.scale.set(3.2, 1.2, 1);
+  return sprite;
+};
+
+function DetectionDemoPanel({ direction }) {
+  const panelMountRef = useRef(null);
+  const [vehicleCount, setVehicleCount] = useState(0);
+
+  useEffect(() => {
+    const mountNode = panelMountRef.current;
+    if (!mountNode) return undefined;
+
+    const config = DETECTION_PANEL_CONFIG[direction] || DETECTION_PANEL_CONFIG.north;
+    const scene = new THREE.Scene();
+    scene.background = new THREE.Color(0x11161f);
+
+    const camera = new THREE.PerspectiveCamera(52, 1, 0.1, 200);
+    camera.position.copy(config.cameraPosition);
+    camera.lookAt(config.cameraLookAt);
+
+    const renderer = new THREE.WebGLRenderer({ antialias: true });
+    renderer.setPixelRatio(Math.min(window.devicePixelRatio, 1.5));
+    renderer.shadowMap.enabled = true;
+    renderer.shadowMap.type = THREE.PCFSoftShadowMap;
+    renderer.outputColorSpace = THREE.SRGBColorSpace;
+    mountNode.appendChild(renderer.domElement);
+
+    const ambient = new THREE.AmbientLight(0xffffff, 0.75);
+    scene.add(ambient);
+    const directional = new THREE.DirectionalLight(0xffffff, 1.1);
+    directional.position.set(20, 30, 18);
+    directional.castShadow = true;
+    directional.shadow.mapSize.set(1024, 1024);
+    scene.add(directional);
+
+    const shoulder = new THREE.Mesh(
+      new THREE.PlaneGeometry(20, 90),
+      new THREE.MeshStandardMaterial({ color: 0x1c222c, roughness: 0.95, metalness: 0.08 })
+    );
+    shoulder.rotation.x = -Math.PI / 2;
+    shoulder.position.y = -0.02;
+    scene.add(shoulder);
+
+    const road = new THREE.Mesh(
+      new THREE.PlaneGeometry(14, 90),
+      new THREE.MeshStandardMaterial({ color: 0x252a33, roughness: 0.9, metalness: 0.1 })
+    );
+    road.rotation.x = -Math.PI / 2;
+    road.receiveShadow = true;
+    scene.add(road);
+
+    for (let z = -40; z <= 40; z += 8) {
+      const stripe = new THREE.Mesh(
+        new THREE.BoxGeometry(0.2, 0.02, 3.8),
+        new THREE.MeshStandardMaterial({ color: 0xdfe5ef, roughness: 0.7, metalness: 0.08 })
+      );
+      stripe.position.set(0, 0.02, z);
+      scene.add(stripe);
+    }
+
+    const detectionLineZ = 5;
+    const detectionLine = new THREE.Mesh(
+      new THREE.BoxGeometry(13, 0.06, 0.24),
+      new THREE.MeshStandardMaterial({
+        color: config.lineColor,
+        emissive: config.lineColor,
+        emissiveIntensity: 0.65,
+      })
+    );
+    detectionLine.position.set(0, 0.05, detectionLineZ);
+    scene.add(detectionLine);
+
+    const vehicles = [];
+    const lanes = [-3.1, 0, 3.1];
+    const palette = [0xff3b30, 0x007aff, 0xffcc00, 0x34c759, 0xaf52de, 0xff9500];
+    const labels = {
+      car: "car",
+      bus: "bus",
+      bicycle: "bike",
+      motorbike: "bike",
+    };
+    const spawnTypes = ["car", "car", "bus", "bicycle", "motorbike"];
+    let spawnTimerId = 0;
+    const clock = new THREE.Clock();
+    let rafId = 0;
+
+    const resizeRenderer = () => {
+      const width = mountNode.clientWidth || 320;
+      const height = mountNode.clientHeight || 220;
+      renderer.setSize(width, height);
+      camera.aspect = width / height;
+      camera.updateProjectionMatrix();
+    };
+
+    const spawnVehicle = () => {
+      const type = spawnTypes[Math.floor(Math.random() * spawnTypes.length)];
+      const color = palette[Math.floor(Math.random() * palette.length)];
+      const mesh = createDemoVehicleMesh(type, color);
+      mesh.position.set(lanes[Math.floor(Math.random() * lanes.length)], 0, -42);
+      mesh.lookAt(new THREE.Vector3(mesh.position.x, 0, -35));
+      mesh.castShadow = true;
+
+      const box = new THREE.BoxHelper(mesh, 0x4de2ff);
+      const label = createLabelSprite(labels[type] || "car");
+      label.position.set(mesh.position.x, 4.2, mesh.position.z);
+      scene.add(mesh);
+      scene.add(box);
+      scene.add(label);
+
+      vehicles.push({
+        mesh,
+        box,
+        label,
+        speed: 7 + Math.random() * 6,
+        counted: false,
+        prevZ: mesh.position.z,
+      });
+    };
+
+    const scheduleSpawn = () => {
+      spawnVehicle();
+      const delay = 700 + Math.random() * 1100;
+      spawnTimerId = window.setTimeout(scheduleSpawn, delay);
+    };
+
+    const animatePanel = () => {
+      rafId = requestAnimationFrame(animatePanel);
+      const dt = Math.min(clock.getDelta(), 0.045);
+      for (let i = vehicles.length - 1; i >= 0; i -= 1) {
+        const vehicle = vehicles[i];
+        vehicle.prevZ = vehicle.mesh.position.z;
+        vehicle.mesh.position.z += vehicle.speed * dt;
+        vehicle.mesh.lookAt(new THREE.Vector3(vehicle.mesh.position.x, 0, vehicle.mesh.position.z + 3));
+        vehicle.box.update();
+        vehicle.label.position.set(vehicle.mesh.position.x, 4.2, vehicle.mesh.position.z);
+
+        if (!vehicle.counted && vehicle.prevZ < detectionLineZ && vehicle.mesh.position.z >= detectionLineZ) {
+          vehicle.counted = true;
+          setVehicleCount((prev) => prev + 1);
+        }
+
+        if (vehicle.mesh.position.z > 48) {
+          scene.remove(vehicle.mesh);
+          scene.remove(vehicle.box);
+          scene.remove(vehicle.label);
+          if (vehicle.label.material?.map) vehicle.label.material.map.dispose();
+          if (vehicle.label.material) vehicle.label.material.dispose();
+          vehicles.splice(i, 1);
+        }
+      }
+
+      renderer.render(scene, camera);
+    };
+
+    resizeRenderer();
+    scheduleSpawn();
+    animatePanel();
+    window.addEventListener("resize", resizeRenderer);
+
+    return () => {
+      cancelAnimationFrame(rafId);
+      window.clearTimeout(spawnTimerId);
+      window.removeEventListener("resize", resizeRenderer);
+      vehicles.forEach((vehicle) => {
+        scene.remove(vehicle.mesh);
+        scene.remove(vehicle.box);
+        scene.remove(vehicle.label);
+        if (vehicle.label.material?.map) vehicle.label.material.map.dispose();
+        if (vehicle.label.material) vehicle.label.material.dispose();
+      });
+      if (mountNode && renderer.domElement.parentElement === mountNode) {
+        mountNode.removeChild(renderer.domElement);
+      }
+      renderer.dispose();
+    };
+  }, [direction]);
+
+  return (
+    <article className="detectionPanel">
+      <header className="detectionPanelHeader">
+        <h3>{direction.charAt(0).toUpperCase() + direction.slice(1)}</h3>
+        <span>Vehicle Count: {vehicleCount}</span>
+      </header>
+      <div ref={panelMountRef} className="detectionPanelCanvas" />
+    </article>
+  );
+}
+
 function App() {
   const mountRef = useRef(null);
   const activeSignalRef = useRef("north");
@@ -117,16 +454,19 @@ function App() {
     scene.fog = new THREE.Fog(0x20252e, 80, 160);
 
     const mountNode = mountRef.current;
-    const camera = new THREE.PerspectiveCamera(58, window.innerWidth / window.innerHeight, 0.1, 1000);
+    const mountWidth = mountNode?.clientWidth || window.innerWidth;
+    const mountHeight = mountNode?.clientHeight || window.innerHeight;
+    const camera = new THREE.PerspectiveCamera(58, mountWidth / mountHeight, 0.1, 1000);
     camera.position.set(13, 17, 22);
     camera.lookAt(0, 0, 0);
 
     const renderer = new THREE.WebGLRenderer({ antialias: true });
-    renderer.setSize(window.innerWidth, window.innerHeight);
+    renderer.setSize(mountWidth, mountHeight);
     renderer.setPixelRatio(Math.min(window.devicePixelRatio, 2));
     renderer.shadowMap.enabled = true;
     renderer.shadowMap.type = THREE.PCFSoftShadowMap;
     renderer.outputColorSpace = THREE.SRGBColorSpace;
+    renderer.domElement.style.display = "block";
     mountNode.appendChild(renderer.domElement);
 
     const ambient = new THREE.AmbientLight(0xffffff, 0.65);
@@ -1861,9 +2201,11 @@ function App() {
     animate();
 
     const handleResize = () => {
-      camera.aspect = window.innerWidth / window.innerHeight;
+      const nextWidth = mountNode?.clientWidth || window.innerWidth;
+      const nextHeight = mountNode?.clientHeight || window.innerHeight;
+      camera.aspect = nextWidth / nextHeight;
       camera.updateProjectionMatrix();
-      renderer.setSize(window.innerWidth, window.innerHeight);
+      renderer.setSize(nextWidth, nextHeight);
     };
 
     window.addEventListener("resize", handleResize);
@@ -1895,20 +2237,35 @@ function App() {
 
   return (
     <div className="app">
-      <div className="overlay">
-        <h2>Smart Traffic Monitor</h2>
-        <p>North: {trafficData.north}</p>
-        <p>South: {trafficData.south}</p>
-        <p>East: {trafficData.east}</p>
-        <p>West: {trafficData.west}</p>
-        <p>Active Signal: {trafficData.activeSignal}</p>
-        <p>Phase: {trafficData.phase}</p>
-        <p>Emergency: {trafficData.emergencyActive ? "ACTIVE" : "IDLE"}</p>
-        <p>Emergency Dir: {trafficData.emergencyDirection}</p>
-        <p>Remaining Time: {remainingTime}s</p>
-        <p>Cars In Intersection: {trafficData.carsInIntersection}</p>
+      <div className="main-simulation">
+        <section className="simulationSection">
+          <div className="overlay">
+            <h2>Smart Traffic Monitor</h2>
+            <p>North: {trafficData.north}</p>
+            <p>South: {trafficData.south}</p>
+            <p>East: {trafficData.east}</p>
+            <p>West: {trafficData.west}</p>
+            <p>Active Signal: {trafficData.activeSignal}</p>
+            <p>Phase: {trafficData.phase}</p>
+            <p>Emergency: {trafficData.emergencyActive ? "ACTIVE" : "IDLE"}</p>
+            <p>Emergency Dir: {trafficData.emergencyDirection}</p>
+            <p>Remaining Time: {remainingTime}s</p>
+            <p>Cars In Intersection: {trafficData.carsInIntersection}</p>
+          </div>
+          <div ref={mountRef} className="canvasMount" />
+        </section>
       </div>
-      <div ref={mountRef} className="canvasMount" />
+
+      <div className="detection-demo-section">
+        <section className="detectionSection">
+          <h2>AI Object Detection Demo</h2>
+          <div className="detectionGrid">
+            {DIRECTIONS.map((direction) => (
+              <DetectionDemoPanel key={direction} direction={direction} />
+            ))}
+          </div>
+        </section>
+      </div>
     </div>
   );
 }
