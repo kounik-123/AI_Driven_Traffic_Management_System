@@ -1055,12 +1055,11 @@ function App() {
     socket.on("connect", () => {});
 
     const isCarInIntersection = (car) => {
-      const stopLineDistance = car.path.curves[0].getLength();
-      const intersectionCurveDistance = car.path.curves[1].getLength();
-      const exitDistance = stopLineDistance + intersectionCurveDistance;
-      const rearProgress = getProgress(car) - car.length / 2;
-      const frontProgress = getFrontProgress(car);
-      return frontProgress > stopLineDistance && rearProgress < exitDistance;
+      const { x, z } = car.mesh.position;
+      const margin = 1.5;
+      const threshold = VEHICLE_CROSSWALK_STOP_ABS + margin;
+      const inBox = Math.abs(x) < threshold && Math.abs(z) < threshold;
+      return inBox;
     };
     const isCarInCrosswalkArea = (car) => {
       const { x, z } = car.mesh.position;
@@ -1757,11 +1756,11 @@ function App() {
           p3 = new THREE.Vector3(laneOffset, 0, exit);
         } else if (intention === "LEFT") {
           p2 = new THREE.Vector3(laneOffset, 0, -laneOffset);
-          p3 = new THREE.Vector3(6, 0, -laneOffset);
+          p3 = new THREE.Vector3(stopLine, 0, -laneOffset);
           p4 = new THREE.Vector3(exit, 0, -laneOffset);
         } else if (intention === "RIGHT") {
           p2 = new THREE.Vector3(laneOffset, 0, laneOffset);
-          p3 = new THREE.Vector3(-6, 0, laneOffset);
+          p3 = new THREE.Vector3(-stopLine, 0, laneOffset);
           p4 = new THREE.Vector3(-exit, 0, laneOffset);
         }
       } else if (direction === "south") {
@@ -1771,11 +1770,11 @@ function App() {
           p3 = new THREE.Vector3(laneOffset, 0, -exit);
         } else if (intention === "LEFT") {
           p2 = new THREE.Vector3(laneOffset, 0, -laneOffset);
-          p3 = new THREE.Vector3(-6, 0, -laneOffset);
+          p3 = new THREE.Vector3(-stopLine, 0, -laneOffset);
           p4 = new THREE.Vector3(-exit, 0, -laneOffset);
         } else if (intention === "RIGHT") {
           p2 = new THREE.Vector3(laneOffset, 0, laneOffset);
-          p3 = new THREE.Vector3(6, 0, laneOffset);
+          p3 = new THREE.Vector3(stopLine, 0, laneOffset);
           p4 = new THREE.Vector3(exit, 0, laneOffset);
         }
       } else if (direction === "east") {
@@ -1785,11 +1784,11 @@ function App() {
           p3 = new THREE.Vector3(exit, 0, laneOffset);
         } else if (intention === "LEFT") {
           p2 = new THREE.Vector3(laneOffset, 0, laneOffset);
-          p3 = new THREE.Vector3(laneOffset, 0, -6);
+          p3 = new THREE.Vector3(laneOffset, 0, -stopLine);
           p4 = new THREE.Vector3(laneOffset, 0, -exit);
         } else if (intention === "RIGHT") {
           p2 = new THREE.Vector3(-laneOffset, 0, laneOffset);
-          p3 = new THREE.Vector3(-laneOffset, 0, 6);
+          p3 = new THREE.Vector3(-laneOffset, 0, stopLine);
           p4 = new THREE.Vector3(-laneOffset, 0, exit);
         }
       } else if (direction === "west") {
@@ -1799,11 +1798,11 @@ function App() {
           p3 = new THREE.Vector3(-exit, 0, laneOffset);
         } else if (intention === "LEFT") {
           p2 = new THREE.Vector3(laneOffset, 0, laneOffset);
-          p3 = new THREE.Vector3(laneOffset, 0, 6);
+          p3 = new THREE.Vector3(laneOffset, 0, stopLine);
           p4 = new THREE.Vector3(laneOffset, 0, exit);
         } else if (intention === "RIGHT") {
           p2 = new THREE.Vector3(-laneOffset, 0, laneOffset);
-          p3 = new THREE.Vector3(-laneOffset, 0, -6);
+          p3 = new THREE.Vector3(-laneOffset, 0, -stopLine);
           p4 = new THREE.Vector3(-laneOffset, 0, -exit);
         }
       }
@@ -1817,8 +1816,10 @@ function App() {
       } else {
         // Curve through intersection
         path.add(new THREE.QuadraticBezierCurve3(p1, p2, p3));
-        // Intersection exit to bounds
-        path.add(new THREE.LineCurve3(p3, p4));
+        // If we have a p4, add a final straight line
+        if (p4) {
+          path.add(new THREE.LineCurve3(p3, p4));
+        }
       }
 
       return path;
@@ -1889,6 +1890,7 @@ function App() {
         intention,
         path,
         distanceTravelled: 0,
+        inIntersection: false,
         type,
         speed: 0,
         maxSpeed:
@@ -2080,14 +2082,22 @@ function App() {
         const stopLineFrontProgress = getStopLineFrontProgress(car);
         const emergencyExitProgress = getIntersectionExitProgress(car) + 1.0;
 
+        // Intersection Lock Logic
+        const isIntersectionOccupied = intersectionCarsRef.current.length > 0;
+        const hasBufferPassed = intersectionEmptySinceRef.current !== null && 
+                               (now - intersectionEmptySinceRef.current >= INTERSECTION_EMPTY_BUFFER_MS);
+        const isIntersectionEmpty = !isIntersectionOccupied && hasBufferPassed;
+
         const normalCanEnterIntersection =
           signalPhaseRef.current === "GREEN" &&
           direction === activeSignalRef.current &&
-          !isPedestrianCrossingRef.current;
+          !isPedestrianCrossingRef.current &&
+          isIntersectionEmpty;
         const isEmergencyGreenForLane =
           signalPhaseRef.current === "EMERGENCY_GREEN" &&
           direction === emergencyDirectionRef.current &&
-          !isPedestrianCrossingRef.current;
+          !isPedestrianCrossingRef.current &&
+          isIntersectionEmpty;
         const canEnterIntersection = emergencyActiveRef.current
           ? isEmergencyGreenForLane && car.isAmbulance
           : normalCanEnterIntersection;
@@ -2119,8 +2129,14 @@ function App() {
           targetSpeed = Math.max(targetSpeed, car.maxSpeed * 1.2);
         }
 
-        // Leader Following Logic
-        if (leader) {
+        // Failsafe: Never stop inside the intersection unless emergency all-red
+        if (car.inIntersection && signalPhaseRef.current !== "EMERGENCY_ALL_RED") {
+          targetSpeed = car.maxSpeed;
+          carState = "moving";
+        }
+
+        // Leader Following Logic (Safety Failsafe: Disable inside intersection)
+        if (leader && !car.inIntersection) {
           const gap = directionalGap(leader, car);
           if (gap < STRICT_FOLLOW_GAP) {
             const followerTargetSpeed = Math.max(0, leader.speed * (gap / STRICT_FOLLOW_GAP));
@@ -2144,17 +2160,18 @@ function App() {
         // Movement
         let newFrontProgress = frontProgress + car.speed * delta;
 
-        // Constraints
+        // Constraints: Hard block before intersection
         if (carState === "stopped_at_signal") {
           newFrontProgress = stopLineFrontProgress - STOP_LINE_HOLD_GAP;
         } else if (carState === "stopped_behind_leader" && leader) {
           const leaderRear = getProgress(leader) - leader.length / 2;
           newFrontProgress = leaderRear - STRICT_FOLLOW_GAP;
         } else if (beforeStopLine && !canEnterIntersection && !shouldClearForAmbulance) {
+          // Strict block at stop line
           newFrontProgress = Math.min(newFrontProgress, stopLineFrontProgress - STOP_LINE_HOLD_GAP);
         }
 
-        if (leader) {
+        if (leader && !car.inIntersection) {
           const leaderRear = getProgress(leader) - leader.length / 2;
           newFrontProgress = Math.min(newFrontProgress, leaderRear - STRICT_FOLLOW_GAP);
         }
@@ -2193,6 +2210,12 @@ function App() {
       animationFrameId = requestAnimationFrame(animate);
       const dt = Math.min(clock.getDelta(), 0.05);
       const now = performance.now();
+
+      // Update intersection status for all cars
+      carsRef.current.forEach(car => {
+        car.inIntersection = isCarInIntersection(car);
+      });
+
       updatePedestrians(now, dt);
       updateSignalPhase(now);
       updateRemainingTime(now);
