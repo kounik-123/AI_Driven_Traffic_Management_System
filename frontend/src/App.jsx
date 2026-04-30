@@ -3,11 +3,14 @@ import * as THREE from "three";
 import { io } from "socket.io-client";
 import "./App.css";
 
-const BACKEND_URL = "http://localhost:4000";
+const BACKEND_URL = "https://ai-driven-traffic-management-system.onrender.com";
 const MAX_CARS = 56;
 const MIN_GAP = 3.5;
 const BOUNDS = 55;
 const STOP_LINE = 6;
+const ROAD_WIDTH = 16;
+const LANE_CENTER_OFFSET = 3.6;
+const TURN_LANE_OFFSET = LANE_CENTER_OFFSET * 2;
 
 const DIRECTION_TO_AXIS = {
   north: "z",
@@ -24,19 +27,13 @@ const DIRECTION_TO_SIGN = {
 };
 
 const SPAWN_POINTS = {
-  north: { x: 3, z: -45, rotY: 0 },
-  south: { x: -3, z: 45, rotY: Math.PI },
-  east: { x: -45, z: -3, rotY: Math.PI / 2 },
-  west: { x: 45, z: 3, rotY: -Math.PI / 2 },
+  north: { x: LANE_CENTER_OFFSET, z: -45, rotY: 0 },
+  south: { x: -LANE_CENTER_OFFSET, z: 45, rotY: Math.PI },
+  east: { x: -45, z: -LANE_CENTER_OFFSET, rotY: Math.PI / 2 },
+  west: { x: 45, z: LANE_CENTER_OFFSET, rotY: -Math.PI / 2 },
 };
 
 const DIRECTIONS = ["north", "south", "east", "west"];
-const LANE_OFFSETS = {
-  north: [1.8, 4.8],
-  south: [-1.8, -4.8],
-  east: [-1.8, -4.8],
-  west: [1.8, 4.8],
-};
 const CAR_COLORS = [0xff3b30, 0x007aff, 0xffcc00, 0x34c759, 0xaf52de, 0xff9500];
 const SPAWN_MIN_MS = 1000;
 const SPAWN_MAX_MS = 2000;
@@ -45,7 +42,9 @@ const ACCELERATION = 8.5;
 const DECELERATION = 12.5;
 const SPAWN_GAP = 10;
 const STOP_LINE_HOLD_GAP = 0.25;
-const STRICT_FOLLOW_GAP = MIN_GAP;
+const QUEUE_MIN_VISIBLE_GAP = 1.0;
+const QUEUE_MAX_VISIBLE_GAP = 2.0;
+const QUEUE_SLOWDOWN_BUFFER = 8.5;
 const BASE_GREEN_SECONDS = 8;
 const PER_CAR_GREEN_SECONDS = 1.2;
 const MIN_GREEN_SECONDS = 10;
@@ -350,36 +349,19 @@ function DetectionDemoPanel({ direction }) {
     const animatePanel = () => {
       rafId = requestAnimationFrame(animatePanel);
       const dt = Math.min(clock.getDelta(), 0.045);
-      const laneGroups = new Map();
-      vehicles.forEach((vehicle) => {
-        const laneKey = vehicle.mesh.position.x.toFixed(2);
-        if (!laneGroups.has(laneKey)) laneGroups.set(laneKey, []);
-        laneGroups.get(laneKey).push(vehicle);
-      });
-
-      laneGroups.forEach((laneVehicles) => {
-        laneVehicles.sort((a, b) => b.mesh.position.z - a.mesh.position.z);
-        laneVehicles.forEach((vehicle, index) => {
-          const leader = index > 0 ? laneVehicles[index - 1] : null;
-          vehicle.prevZ = vehicle.mesh.position.z;
-          let nextZ = vehicle.mesh.position.z + vehicle.speed * dt;
-          if (leader) {
-            nextZ = Math.min(nextZ, leader.mesh.position.z - STRICT_FOLLOW_GAP);
-          }
-          vehicle.mesh.position.z = nextZ;
-          vehicle.mesh.lookAt(new THREE.Vector3(vehicle.mesh.position.x, 0, vehicle.mesh.position.z + 3));
-          vehicle.box.update();
-          vehicle.label.position.set(vehicle.mesh.position.x, 4.2, vehicle.mesh.position.z);
-
-          if (!vehicle.counted && vehicle.prevZ < detectionLineZ && vehicle.mesh.position.z >= detectionLineZ) {
-            vehicle.counted = true;
-            setVehicleCount((prev) => prev + 1);
-          }
-        });
-      });
-
       for (let i = vehicles.length - 1; i >= 0; i -= 1) {
         const vehicle = vehicles[i];
+        vehicle.prevZ = vehicle.mesh.position.z;
+        vehicle.mesh.position.z += vehicle.speed * dt;
+        vehicle.mesh.lookAt(new THREE.Vector3(vehicle.mesh.position.x, 0, vehicle.mesh.position.z + 3));
+        vehicle.box.update();
+        vehicle.label.position.set(vehicle.mesh.position.x, 4.2, vehicle.mesh.position.z);
+
+        if (!vehicle.counted && vehicle.prevZ < detectionLineZ && vehicle.mesh.position.z >= detectionLineZ) {
+          vehicle.counted = true;
+          setVehicleCount((prev) => prev + 1);
+        }
+
         if (vehicle.mesh.position.z > 48) {
           scene.remove(vehicle.mesh);
           scene.remove(vehicle.box);
@@ -527,13 +509,13 @@ function App() {
       emissiveIntensity: 0.15,
     });
 
-    const roadEW = new THREE.Mesh(new THREE.PlaneGeometry(90, 14), roadMaterial);
+    const roadEW = new THREE.Mesh(new THREE.PlaneGeometry(90, ROAD_WIDTH), roadMaterial);
     roadEW.rotation.x = -Math.PI / 2;
     roadEW.position.y = 0.03;
     roadEW.receiveShadow = true;
     scene.add(roadEW);
 
-    const roadNS = new THREE.Mesh(new THREE.PlaneGeometry(14, 90), roadMaterial);
+    const roadNS = new THREE.Mesh(new THREE.PlaneGeometry(ROAD_WIDTH, 90), roadMaterial);
     roadNS.rotation.x = -Math.PI / 2;
     roadNS.position.y = 0.035;
     roadNS.receiveShadow = true;
@@ -544,7 +526,7 @@ function App() {
 
     const createEnvironment = () => {
       const size = 120;
-      const roadWidth = 14;
+      const roadWidth = ROAD_WIDTH;
       const cornerSize = (size - roadWidth) / 2;
       const cornerGeom = new THREE.PlaneGeometry(cornerSize, cornerSize);
       
@@ -580,22 +562,53 @@ function App() {
     };
     createEnvironment();
 
-    const laneMarkings = [
-      { x: 0, z: -24, width: 0.28, depth: 5 },
-      { x: 0, z: -16, width: 0.28, depth: 5 },
-      { x: 0, z: 16, width: 0.28, depth: 5 },
-      { x: 0, z: 24, width: 0.28, depth: 5 },
-      { x: -24, z: 0, width: 5, depth: 0.28 },
-      { x: -16, z: 0, width: 5, depth: 0.28 },
-      { x: 16, z: 0, width: 5, depth: 0.28 },
-      { x: 24, z: 0, width: 5, depth: 0.28 },
+    // Continuous raised concrete medians on all four approaches with a symmetric
+    // intersection opening so turning paths remain clear.
+    const medianMaterial = new THREE.MeshStandardMaterial({
+      color: 0xc9ced6,
+      roughness: 0.86,
+      metalness: 0.06,
+    });
+    const medianTopMaterial = new THREE.MeshStandardMaterial({
+      color: 0xd8dde3,
+      roughness: 0.72,
+      metalness: 0.05,
+    });
+    const medianHeight = 0.36;
+    const medianWidth = 0.9;
+    const intersectionOpening = 22; // clean turning gap centered at the intersection
+    const roadHalfLength = 45;
+    const medianHalfLength = (roadHalfLength * 2 - intersectionOpening) / 2;
+    const medianCenterOffset = intersectionOpening / 2 + medianHalfLength / 2;
+    const medianY = 0.03 + medianHeight / 2;
+
+    const medianSegments = [
+      // North arm (toward -Z) and south arm (toward +Z)
+      { x: 0, z: -medianCenterOffset, width: medianWidth, depth: medianHalfLength },
+      { x: 0, z: medianCenterOffset, width: medianWidth, depth: medianHalfLength },
+      // West arm (toward -X) and east arm (toward +X)
+      { x: -medianCenterOffset, z: 0, width: medianHalfLength, depth: medianWidth },
+      { x: medianCenterOffset, z: 0, width: medianHalfLength, depth: medianWidth },
     ];
 
-    laneMarkings.forEach((marking) => {
-      const mesh = new THREE.Mesh(new THREE.BoxGeometry(marking.width, 0.05, marking.depth), markingMaterial);
-      mesh.position.set(marking.x, 0.09, marking.z);
-      mesh.receiveShadow = true;
-      scene.add(mesh);
+    medianSegments.forEach((segment) => {
+      const base = new THREE.Mesh(
+        new THREE.BoxGeometry(segment.width, medianHeight, segment.depth),
+        medianMaterial
+      );
+      base.position.set(segment.x, medianY, segment.z);
+      base.castShadow = true;
+      base.receiveShadow = true;
+      scene.add(base);
+
+      const topCap = new THREE.Mesh(
+        new THREE.BoxGeometry(segment.width * 0.8, 0.06, segment.depth * 0.95),
+        medianTopMaterial
+      );
+      topCap.position.set(segment.x, medianY + medianHeight / 2 + 0.03, segment.z);
+      topCap.castShadow = true;
+      topCap.receiveShadow = true;
+      scene.add(topCap);
     });
 
     const stopMarkings = [
@@ -946,25 +959,25 @@ function App() {
         x: 10.8,
         z: -24,
         monitorDirection: "north",
-        target: new THREE.Vector3(3, 0, -36),
+        target: new THREE.Vector3(LANE_CENTER_OFFSET, 0, -36),
       },
       south: {
         x: -10.8,
         z: 24,
         monitorDirection: "south",
-        target: new THREE.Vector3(-3, 0, 36),
+        target: new THREE.Vector3(-LANE_CENTER_OFFSET, 0, 36),
       },
       east: {
         x: 24,
         z: 10.8,
         monitorDirection: "west",
-        target: new THREE.Vector3(36, 0, 3),
+        target: new THREE.Vector3(36, 0, LANE_CENTER_OFFSET),
       },
       west: {
         x: -24,
         z: -10.8,
         monitorDirection: "east",
-        target: new THREE.Vector3(-36, 0, -3),
+        target: new THREE.Vector3(-36, 0, -LANE_CENTER_OFFSET),
       },
     };
     DIRECTIONS.forEach((direction) => {
@@ -1056,11 +1069,12 @@ function App() {
     socket.on("connect", () => {});
 
     const isCarInIntersection = (car) => {
-      const { x, z } = car.mesh.position;
-      const margin = 1.5;
-      const threshold = VEHICLE_CROSSWALK_STOP_ABS + margin;
-      const inBox = Math.abs(x) < threshold && Math.abs(z) < threshold;
-      return inBox;
+      const stopLineDistance = car.path.curves[0].getLength();
+      const intersectionCurveDistance = car.path.curves[1].getLength();
+      const exitDistance = stopLineDistance + intersectionCurveDistance;
+      const rearProgress = getProgress(car) - car.length / 2;
+      const frontProgress = getFrontProgress(car);
+      return frontProgress > stopLineDistance && rearProgress < exitDistance;
     };
     const isCarInCrosswalkArea = (car) => {
       const { x, z } = car.mesh.position;
@@ -1772,75 +1786,70 @@ function App() {
       isPedestrianCrossingRef.current = hasCrossing;
     };
 
-    const getVehiclePath = (direction, intention, laneOffset) => {
+    const getVehiclePath = (direction, intention) => {
       const spawn = SPAWN_POINTS[direction];
       const stopLine = STOP_LINE;
       const exit = BOUNDS + 10;
       const path = new THREE.CurvePath();
 
-      // Adjust start point based on lane offset
-      const p0 = new THREE.Vector3(
-        direction === "north" || direction === "south" ? laneOffset : spawn.x,
-        0,
-        direction === "east" || direction === "west" ? laneOffset : spawn.z
-      );
+      const p0 = new THREE.Vector3(spawn.x, 0, spawn.z);
       let p1, p2, p3, p4;
 
       if (direction === "north") {
-        p1 = new THREE.Vector3(laneOffset, 0, -stopLine);
+        p1 = new THREE.Vector3(LANE_CENTER_OFFSET, 0, -stopLine);
         if (intention === "STRAIGHT") {
-          p2 = new THREE.Vector3(laneOffset, 0, stopLine);
-          p3 = new THREE.Vector3(laneOffset, 0, exit);
+          p2 = new THREE.Vector3(LANE_CENTER_OFFSET, 0, stopLine);
+          p3 = new THREE.Vector3(LANE_CENTER_OFFSET, 0, exit);
         } else if (intention === "LEFT") {
-          p2 = new THREE.Vector3(laneOffset, 0, -laneOffset);
-          p3 = new THREE.Vector3(stopLine, 0, -laneOffset);
-          p4 = new THREE.Vector3(exit, 0, -laneOffset);
+          p2 = new THREE.Vector3(LANE_CENTER_OFFSET, 0, -LANE_CENTER_OFFSET); // Control point
+          p3 = new THREE.Vector3(TURN_LANE_OFFSET, 0, -LANE_CENTER_OFFSET);
+          p4 = new THREE.Vector3(exit, 0, -LANE_CENTER_OFFSET);
         } else if (intention === "RIGHT") {
-          p2 = new THREE.Vector3(laneOffset, 0, laneOffset);
-          p3 = new THREE.Vector3(-stopLine, 0, laneOffset);
-          p4 = new THREE.Vector3(-exit, 0, laneOffset);
+          p2 = new THREE.Vector3(LANE_CENTER_OFFSET, 0, LANE_CENTER_OFFSET); // Control point
+          p3 = new THREE.Vector3(-TURN_LANE_OFFSET, 0, LANE_CENTER_OFFSET);
+          p4 = new THREE.Vector3(-exit, 0, LANE_CENTER_OFFSET);
         }
       } else if (direction === "south") {
-        p1 = new THREE.Vector3(laneOffset, 0, stopLine);
+        p1 = new THREE.Vector3(-LANE_CENTER_OFFSET, 0, stopLine);
         if (intention === "STRAIGHT") {
-          p2 = new THREE.Vector3(laneOffset, 0, -stopLine);
-          p3 = new THREE.Vector3(laneOffset, 0, -exit);
+          p2 = new THREE.Vector3(-LANE_CENTER_OFFSET, 0, -stopLine);
+          p3 = new THREE.Vector3(-LANE_CENTER_OFFSET, 0, -exit);
         } else if (intention === "LEFT") {
-          p2 = new THREE.Vector3(laneOffset, 0, -laneOffset);
-          p3 = new THREE.Vector3(-stopLine, 0, -laneOffset);
-          p4 = new THREE.Vector3(-exit, 0, -laneOffset);
+          p2 = new THREE.Vector3(-LANE_CENTER_OFFSET, 0, LANE_CENTER_OFFSET);
+          p3 = new THREE.Vector3(-TURN_LANE_OFFSET, 0, LANE_CENTER_OFFSET);
+          p4 = new THREE.Vector3(-exit, 0, LANE_CENTER_OFFSET);
         } else if (intention === "RIGHT") {
-          p2 = new THREE.Vector3(laneOffset, 0, laneOffset);
-          p3 = new THREE.Vector3(stopLine, 0, laneOffset);
-          p4 = new THREE.Vector3(exit, 0, laneOffset);
+          p2 = new THREE.Vector3(-LANE_CENTER_OFFSET, 0, -LANE_CENTER_OFFSET);
+          p3 = new THREE.Vector3(TURN_LANE_OFFSET, 0, -LANE_CENTER_OFFSET);
+          p4 = new THREE.Vector3(exit, 0, -LANE_CENTER_OFFSET);
         }
       } else if (direction === "east") {
-        p1 = new THREE.Vector3(-stopLine, 0, laneOffset);
+        p1 = new THREE.Vector3(-stopLine, 0, -LANE_CENTER_OFFSET);
         if (intention === "STRAIGHT") {
-          p2 = new THREE.Vector3(stopLine, 0, laneOffset);
-          p3 = new THREE.Vector3(exit, 0, laneOffset);
+          p2 = new THREE.Vector3(stopLine, 0, -LANE_CENTER_OFFSET);
+          p3 = new THREE.Vector3(exit, 0, -LANE_CENTER_OFFSET);
         } else if (intention === "LEFT") {
-          p2 = new THREE.Vector3(laneOffset, 0, laneOffset);
-          p3 = new THREE.Vector3(laneOffset, 0, -stopLine);
-          p4 = new THREE.Vector3(laneOffset, 0, -exit);
+          p2 = new THREE.Vector3(-LANE_CENTER_OFFSET, 0, -LANE_CENTER_OFFSET);
+          p3 = new THREE.Vector3(-LANE_CENTER_OFFSET, 0, -TURN_LANE_OFFSET);
+          p4 = new THREE.Vector3(-LANE_CENTER_OFFSET, 0, -exit);
         } else if (intention === "RIGHT") {
-          p2 = new THREE.Vector3(-laneOffset, 0, laneOffset);
-          p3 = new THREE.Vector3(-laneOffset, 0, stopLine);
-          p4 = new THREE.Vector3(-laneOffset, 0, exit);
+          p2 = new THREE.Vector3(LANE_CENTER_OFFSET, 0, -LANE_CENTER_OFFSET);
+          p3 = new THREE.Vector3(LANE_CENTER_OFFSET, 0, TURN_LANE_OFFSET);
+          p4 = new THREE.Vector3(LANE_CENTER_OFFSET, 0, exit);
         }
       } else if (direction === "west") {
-        p1 = new THREE.Vector3(stopLine, 0, laneOffset);
+        p1 = new THREE.Vector3(stopLine, 0, LANE_CENTER_OFFSET);
         if (intention === "STRAIGHT") {
-          p2 = new THREE.Vector3(-stopLine, 0, laneOffset);
-          p3 = new THREE.Vector3(-exit, 0, laneOffset);
+          p2 = new THREE.Vector3(-stopLine, 0, LANE_CENTER_OFFSET);
+          p3 = new THREE.Vector3(-exit, 0, LANE_CENTER_OFFSET);
         } else if (intention === "LEFT") {
-          p2 = new THREE.Vector3(laneOffset, 0, laneOffset);
-          p3 = new THREE.Vector3(laneOffset, 0, stopLine);
-          p4 = new THREE.Vector3(laneOffset, 0, exit);
+          p2 = new THREE.Vector3(LANE_CENTER_OFFSET, 0, LANE_CENTER_OFFSET);
+          p3 = new THREE.Vector3(LANE_CENTER_OFFSET, 0, TURN_LANE_OFFSET);
+          p4 = new THREE.Vector3(LANE_CENTER_OFFSET, 0, exit);
         } else if (intention === "RIGHT") {
-          p2 = new THREE.Vector3(-laneOffset, 0, laneOffset);
-          p3 = new THREE.Vector3(-laneOffset, 0, -stopLine);
-          p4 = new THREE.Vector3(-laneOffset, 0, -exit);
+          p2 = new THREE.Vector3(-LANE_CENTER_OFFSET, 0, LANE_CENTER_OFFSET);
+          p3 = new THREE.Vector3(-LANE_CENTER_OFFSET, 0, -TURN_LANE_OFFSET);
+          p4 = new THREE.Vector3(-LANE_CENTER_OFFSET, 0, -exit);
         }
       }
 
@@ -1853,10 +1862,8 @@ function App() {
       } else {
         // Curve through intersection
         path.add(new THREE.QuadraticBezierCurve3(p1, p2, p3));
-        // If we have a p4, add a final straight line
-        if (p4) {
-          path.add(new THREE.LineCurve3(p3, p4));
-        }
+        // Intersection exit to bounds
+        path.add(new THREE.LineCurve3(p3, p4));
       }
 
       return path;
@@ -1871,9 +1878,6 @@ function App() {
 
     const createCar = (direction) => {
       if (carsRef.current.length >= MAX_CARS) return;
-
-      const laneId = Math.floor(Math.random() * LANE_OFFSETS[direction].length);
-      const laneOffset = LANE_OFFSETS[direction][laneId];
 
       const shouldSpawnAmbulance =
         !emergencyActiveRef.current && Math.random() < AMBULANCE_SPAWN_PROBABILITY;
@@ -1894,9 +1898,9 @@ function App() {
                 ? 2.4
                 : 4.5;
 
-      // Strict lane spawn spacing: only check SAME lane
+      // Strict lane spawn spacing: never create a car too close to one ahead.
       const isSpawnBlocked = carsRef.current.some((car) => {
-        if (car.direction !== direction || car.laneId !== laneId) return false;
+        if (car.direction !== direction) return false;
         // Only consider cars that haven't cleared the spawn area
         const gapAhead = car.distanceTravelled - (car.length + length) / 2;
         return gapAhead >= 0 && gapAhead < SPAWN_GAP;
@@ -1906,7 +1910,7 @@ function App() {
 
       const color = shouldSpawnAmbulance ? 0xffffff : CAR_COLORS[Math.floor(Math.random() * CAR_COLORS.length)];
       const intention = shouldSpawnAmbulance ? "STRAIGHT" : getRandomIntention();
-      const path = getVehiclePath(direction, intention, laneOffset);
+      const path = getVehiclePath(direction, intention);
 
       const mesh = createVehicleMesh(type, color);
       const startPos = path.getPoint(0);
@@ -1922,12 +1926,9 @@ function App() {
       carsRef.current.push({
         id: createdCarId,
         direction,
-        laneId,
-        laneOffset,
         intention,
         path,
         distanceTravelled: 0,
-        inIntersection: false,
         type,
         speed: 0,
         maxSpeed:
@@ -1975,6 +1976,10 @@ function App() {
       const leaderRear = getProgress(leader) - leader.length / 2;
       const followerFront = getFrontProgress(follower);
       return leaderRear - followerFront;
+    };
+    const getQueueTargetGap = (leader, follower) => {
+      const lengthScaledGap = 0.8 + (leader.length + follower.length) * 0.08;
+      return Math.min(QUEUE_MAX_VISIBLE_GAP, Math.max(QUEUE_MIN_VISIBLE_GAP, lengthScaledGap));
     };
 
     const getProgress = (car) => car.distanceTravelled;
@@ -2105,25 +2110,11 @@ function App() {
           : null;
 
       cars.forEach((car, index) => {
-        // Find the leader in the same lane
-        let leader = null;
-        for (let i = index - 1; i >= 0; i--) {
-          if (cars[i].laneId === car.laneId) {
-            leader = cars[i];
-            break;
-          }
-        }
-
+        const leader = index > 0 ? cars[index - 1] : null;
         const frontProgress = getFrontProgress(car);
         const distanceToStop = distanceToStopLine(car);
         const stopLineFrontProgress = getStopLineFrontProgress(car);
         const emergencyExitProgress = getIntersectionExitProgress(car) + 1.0;
-
-        // Intersection Lock Logic
-        const isIntersectionOccupied = intersectionCarsRef.current.length > 0;
-        const hasBufferPassed = intersectionEmptySinceRef.current !== null && 
-                               (now - intersectionEmptySinceRef.current >= INTERSECTION_EMPTY_BUFFER_MS);
-        const isIntersectionEmpty = !isIntersectionOccupied && hasBufferPassed;
 
         const normalCanEnterIntersection =
           signalPhaseRef.current === "GREEN" &&
@@ -2164,6 +2155,7 @@ function App() {
           targetSpeed = Math.max(targetSpeed, car.maxSpeed * 1.2);
         }
 
+<<<<<<< HEAD
         // Failsafe: Maintain speed inside intersection (don't reduce speed unnecessarily)
         if (car.inIntersection && signalPhaseRef.current !== "EMERGENCY_ALL_RED") {
           // Keep current speed or accelerate to maxSpeed, never force reduction
@@ -2228,6 +2220,28 @@ function App() {
                 targetSpeed = 0;
                 carState = "stopped_behind_leader";
               }
+=======
+        // Leader Following Logic
+        if (leader) {
+          const gap = directionalGap(leader, car);
+          const queueTargetGap = getQueueTargetGap(leader, car);
+          const queueHardStopGap = Math.max(0.25, queueTargetGap - 0.2);
+          const queueSlowdownStartGap = queueTargetGap + QUEUE_SLOWDOWN_BUFFER;
+
+          if (gap <= queueHardStopGap) {
+            targetSpeed = 0;
+            carState = "stopped_behind_leader";
+          } else if (gap < queueSlowdownStartGap) {
+            const blend = Math.max(
+              0,
+              Math.min(1, (gap - queueHardStopGap) / (queueSlowdownStartGap - queueHardStopGap))
+            );
+            const followSpeed = leader.speed + (car.maxSpeed - leader.speed) * blend * 0.35;
+            targetSpeed = Math.min(targetSpeed, Math.max(0, followSpeed));
+            if (leader.speed < 0.2 && gap <= queueTargetGap + 0.2) {
+              targetSpeed = 0;
+              carState = "stopped_behind_leader";
+>>>>>>> c9d6d4387f1812ec600b6279a87bf50447e7bda5
             }
           }
         }
@@ -2269,6 +2283,7 @@ function App() {
 
         // Movement - Compute next position first
         let newFrontProgress = frontProgress + car.speed * delta;
+<<<<<<< HEAD
         
         // Epsilon stop: if movement is negligible, lock position
         if (Math.abs(newFrontProgress - frontProgress) < 0.01) {
@@ -2302,6 +2317,24 @@ function App() {
         if (clamped && newFrontProgress <= frontProgress + 0.001) {
           car.speed = 0;
           newFrontProgress = frontProgress;
+=======
+
+        // Constraints
+        if (carState === "stopped_at_signal") {
+          newFrontProgress = stopLineFrontProgress - STOP_LINE_HOLD_GAP;
+        } else if (carState === "stopped_behind_leader" && leader) {
+          const leaderRear = getProgress(leader) - leader.length / 2;
+          const queueTargetGap = getQueueTargetGap(leader, car);
+          newFrontProgress = leaderRear - queueTargetGap;
+        } else if (beforeStopLine && !canEnterIntersection && !shouldClearForAmbulance) {
+          newFrontProgress = Math.min(newFrontProgress, stopLineFrontProgress - STOP_LINE_HOLD_GAP);
+        }
+
+        if (leader) {
+          const leaderRear = getProgress(leader) - leader.length / 2;
+          const queueTargetGap = getQueueTargetGap(leader, car);
+          newFrontProgress = Math.min(newFrontProgress, leaderRear - queueTargetGap);
+>>>>>>> c9d6d4387f1812ec600b6279a87bf50447e7bda5
         }
 
         const prevDistance = car.distanceTravelled;
@@ -2340,12 +2373,6 @@ function App() {
       animationFrameId = requestAnimationFrame(animate);
       const dt = Math.min(clock.getDelta(), 0.05);
       const now = performance.now();
-
-      // Update intersection status for all cars
-      carsRef.current.forEach(car => {
-        car.inIntersection = isCarInIntersection(car);
-      });
-
       updatePedestrians(now, dt);
       updateSignalPhase(now);
       updateRemainingTime(now);
