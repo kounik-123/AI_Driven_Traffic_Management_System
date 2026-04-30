@@ -995,6 +995,7 @@ function App() {
       if (phase === "GREEN") remainingMs = greenDurationMsRef.current - elapsed;
       if (phase === "YELLOW") remainingMs = SIGNAL_YELLOW_MS - elapsed;
       if (phase === "EMERGENCY_ALL_RED") remainingMs = EMERGENCY_ALL_RED_MS - elapsed;
+      if (phase === "EMERGENCY_GREEN") remainingMs = 999999; // Emergency stays active until cleared
       if (phase === "ALL_RED") {
         if (pedestrianPhaseActiveRef.current && pedestrianPhaseStartRef.current >= 0) {
           remainingMs = PEDESTRIAN_WALK_MS - (now - pedestrianPhaseStartRef.current);
@@ -1297,6 +1298,25 @@ function App() {
             phase: "ALL_RED",
             activeSignal: activeSignalRef.current,
           }));
+        } else {
+          // FORCE TRANSITION if stuck too long (deadlock prevention)
+          if (elapsed > 5000) {
+            const completedDirection = activeSignalRef.current;
+            if (!completedDirectionSetRef.current.has(completedDirection)) {
+              completedDirectionSetRef.current.add(completedDirection);
+            }
+            completedVehicleDirectionsRef.current = completedDirectionSetRef.current.size;
+            signalPhaseRef.current = "ALL_RED";
+            signalTransitionStartRef.current = now;
+            pedestrianSignalRef.current = "DONT_WALK";
+            pedestrianPhaseStartRef.current = -1;
+            pedestrianPhaseActiveRef.current = false;
+            setTrafficData((prev) => ({
+              ...prev,
+              phase: "ALL_RED",
+              activeSignal: activeSignalRef.current,
+            }));
+          }
         }
         return;
       }
@@ -1305,12 +1325,24 @@ function App() {
         const shouldStartPedestrianPhase =
           completedDirectionSetRef.current.size >= SIGNAL_CYCLE_ORDER.length;
         if (shouldStartPedestrianPhase && !pedestrianPhaseActiveRef.current) {
-          if (!hasStableEmptyWindow || hasCarsInCrosswalk) return;
-          startPedestrianPhase(now);
-          return;
+          if (!hasStableEmptyWindow || hasCarsInCrosswalk) {
+            // FORCE TRANSITION if stuck (deadlock prevention)
+            if (elapsed > 5000) {
+              pedestrianPhaseActiveRef.current = false;
+            } else {
+              return;
+            }
+          }
         }
 
-        if (elapsed < SIGNAL_ALL_RED_MS || !hasStableEmptyWindow || hasCarsInCrosswalk) return;
+        if (elapsed < SIGNAL_ALL_RED_MS || (!hasStableEmptyWindow && elapsed < 3000) || hasCarsInCrosswalk) {
+          // If stuck too long, force transition
+          if (elapsed < SIGNAL_ALL_RED_MS && elapsed > 5000) {
+            // Force proceed after extended wait
+          } else if (elapsed < SIGNAL_ALL_RED_MS) {
+            return;
+          }
+        }
 
         if (pedestrianPhaseActiveRef.current) {
           const walkElapsed = now - pedestrianPhaseStartRef.current;
@@ -1330,6 +1362,7 @@ function App() {
           completedDirectionSetRef.current.clear();
         }
 
+        // Ensure we always transition to next direction (prevent stuck state)
         const currentDirectionIndex = SIGNAL_CYCLE_ORDER.indexOf(activeSignalRef.current);
         if (currentDirectionIndex >= 0) {
           cycleIndexRef.current = currentDirectionIndex;
@@ -1343,6 +1376,10 @@ function App() {
         signalPhaseRef.current = "GREEN";
         signalTransitionStartRef.current = now;
         lastSignalChangeRef.current = now;
+        
+        // Reset intersection tracking to ensure fresh start
+        intersectionEmptySinceRef.current = now;
+        
         setTrafficData((prev) => ({
           ...prev,
           activeSignal: nextDirection,
@@ -2091,13 +2128,11 @@ function App() {
         const normalCanEnterIntersection =
           signalPhaseRef.current === "GREEN" &&
           direction === activeSignalRef.current &&
-          !isPedestrianCrossingRef.current &&
-          isIntersectionEmpty;
+          !isPedestrianCrossingRef.current;
         const isEmergencyGreenForLane =
           signalPhaseRef.current === "EMERGENCY_GREEN" &&
           direction === emergencyDirectionRef.current &&
-          !isPedestrianCrossingRef.current &&
-          isIntersectionEmpty;
+          !isPedestrianCrossingRef.current;
         const canEnterIntersection = emergencyActiveRef.current
           ? isEmergencyGreenForLane && car.isAmbulance
           : normalCanEnterIntersection;
@@ -2129,20 +2164,67 @@ function App() {
           targetSpeed = Math.max(targetSpeed, car.maxSpeed * 1.2);
         }
 
-        // Failsafe: Never stop inside the intersection unless emergency all-red
+        // Failsafe: Maintain speed inside intersection (don't reduce speed unnecessarily)
         if (car.inIntersection && signalPhaseRef.current !== "EMERGENCY_ALL_RED") {
-          targetSpeed = car.maxSpeed;
+          // Keep current speed or accelerate to maxSpeed, never force reduction
+          targetSpeed = Math.max(targetSpeed, car.maxSpeed);
           carState = "moving";
         }
 
-        // Leader Following Logic (Safety Failsafe: Disable inside intersection)
-        if (leader && !car.inIntersection) {
+        // Leader Following Logic - STRICT collision prevention (check ALL cars, not just same lane)
+        // Find the nearest vehicle ahead regardless of lane to prevent overlaps
+        let nearestLeader = null;
+        let nearestLeaderGap = Number.POSITIVE_INFINITY;
+        
+        for (const otherCar of carsRef.current) {
+          if (otherCar.id === car.id) continue;
+          
+          // Only check vehicles that are ahead of this car
+          const otherFrontProgress = getFrontProgress(otherCar);
+          const gap = otherFrontProgress - frontProgress;
+          
+          // Skip if behind or too far away (> 15 units)
+          if (gap < 0 || gap > 15) continue;
+          
+          // Check physical proximity using world position
+          const dx = car.mesh.position.x - otherCar.mesh.position.x;
+          const dz = car.mesh.position.z - otherCar.mesh.position.z;
+          const distance = Math.sqrt(dx * dx + dz * dz);
+          
+          // If vehicles are close in space (within 6 units), treat as potential collision
+          if (distance < 6 && gap < nearestLeaderGap) {
+            // Calculate actual gap along path
+            const actualGap = directionalGap(otherCar, car);
+            if (actualGap < nearestLeaderGap && actualGap > -2) {
+              nearestLeader = otherCar;
+              nearestLeaderGap = actualGap;
+            }
+          }
+        }
+        
+        // Apply collision prevention with nearest leader
+        if (nearestLeader && nearestLeaderGap < STRICT_FOLLOW_GAP) {
+          // HARD STOP if gap is critically small (prevent overlap)
+          if (nearestLeaderGap < 1.5) {
+            targetSpeed = 0;
+            carState = "stopped_behind_leader";
+          } else {
+            // Gradual speed reduction based on gap
+            const speedRatio = Math.max(0, (nearestLeaderGap - 1.5) / (STRICT_FOLLOW_GAP - 1.5));
+            targetSpeed = Math.min(targetSpeed, nearestLeader.speed * speedRatio);
+            if (targetSpeed < 0.3) {
+              targetSpeed = 0;
+              carState = "stopped_behind_leader";
+            }
+          }
+        } else if (leader && !car.inIntersection) {
+          // Original same-lane following for non-critical situations
           const gap = directionalGap(leader, car);
           if (gap < STRICT_FOLLOW_GAP) {
             const followerTargetSpeed = Math.max(0, leader.speed * (gap / STRICT_FOLLOW_GAP));
             if (followerTargetSpeed < targetSpeed) {
               targetSpeed = followerTargetSpeed;
-              if (targetSpeed < 0.5) {
+              if (targetSpeed < 0.3) {
                 targetSpeed = 0;
                 carState = "stopped_behind_leader";
               }
@@ -2150,30 +2232,76 @@ function App() {
           }
         }
 
-        // Speed Update
-        if (car.speed < targetSpeed) {
-          car.speed = Math.min(car.speed + 15 * delta, targetSpeed);
-        } else {
-          car.speed = Math.max(car.speed - 25 * delta, targetSpeed);
+        // Intersection conflict detection for turning vehicles (minimal impact on speed)
+        if (car.intention !== "STRAIGHT" && !car.inIntersection && distanceToStop <= 0 && distanceToStop > -5) {
+          // Only check for immediate conflicts (vehicles very close to collision)
+          let hasImmediateConflict = false;
+          for (const otherCar of intersectionCarsRef.current) {
+            if (otherCar.id === car.id) continue;
+            
+            // Check physical distance, not just presence in intersection
+            const dx = car.mesh.position.x - otherCar.mesh.position.x;
+            const dz = car.mesh.position.z - otherCar.mesh.position.z;
+            const distance = Math.sqrt(dx * dx + dz * dz);
+            
+            // Only slow down if another vehicle is very close (< 5 units)
+            if (distance < 5) {
+              hasImmediateConflict = true;
+              break;
+            }
+          }
+          // Minimal speed reduction only for immediate conflicts (90% speed maintained)
+          if (hasImmediateConflict) {
+            targetSpeed = Math.min(targetSpeed, car.maxSpeed * 0.9);
+          }
         }
 
-        // Movement
+        // Speed Update - Smooth damping to prevent oscillation
+        // Use gradual interpolation instead of instant changes
+        const smoothingFactor = targetSpeed === 0 ? 0.08 : 0.15;
+        car.speed += (targetSpeed - car.speed) * smoothingFactor;
+        
+        // Minimum speed threshold - prevent micro-movements
+        if (car.speed < 0.02) {
+          car.speed = 0;
+          carState = carState.includes("stopped") ? carState : "stopped_at_signal";
+        }
+
+        // Movement - Compute next position first
         let newFrontProgress = frontProgress + car.speed * delta;
-
-        // Constraints: Hard block before intersection
-        if (carState === "stopped_at_signal") {
-          newFrontProgress = stopLineFrontProgress - STOP_LINE_HOLD_GAP;
-        } else if (carState === "stopped_behind_leader" && leader) {
-          const leaderRear = getProgress(leader) - leader.length / 2;
-          newFrontProgress = leaderRear - STRICT_FOLLOW_GAP;
-        } else if (beforeStopLine && !canEnterIntersection && !shouldClearForAmbulance) {
-          // Strict block at stop line
-          newFrontProgress = Math.min(newFrontProgress, stopLineFrontProgress - STOP_LINE_HOLD_GAP);
+        
+        // Epsilon stop: if movement is negligible, lock position
+        if (Math.abs(newFrontProgress - frontProgress) < 0.01) {
+          newFrontProgress = frontProgress;
+          car.speed = 0;
         }
 
-        if (leader && !car.inIntersection) {
+        // Apply constraints ONCE in priority order
+        let clamped = false;
+        
+        // PRIORITY 1: Front car constraint (collision prevention)
+        if (leader) {
           const leaderRear = getProgress(leader) - leader.length / 2;
-          newFrontProgress = Math.min(newFrontProgress, leaderRear - STRICT_FOLLOW_GAP);
+          const maxAllowedByLeader = leaderRear - STRICT_FOLLOW_GAP;
+          if (newFrontProgress > maxAllowedByLeader) {
+            newFrontProgress = maxAllowedByLeader;
+            clamped = true;
+          }
+        }
+        
+        // PRIORITY 2: Stop line constraint
+        if (beforeStopLine && !canEnterIntersection && !shouldClearForAmbulance) {
+          const maxAllowedByStopLine = stopLineFrontProgress - STOP_LINE_HOLD_GAP;
+          if (newFrontProgress > maxAllowedByStopLine) {
+            newFrontProgress = maxAllowedByStopLine;
+            clamped = true;
+          }
+        }
+        
+        // Prevent back-and-forth: if clamped, stop completely
+        if (clamped && newFrontProgress <= frontProgress + 0.001) {
+          car.speed = 0;
+          newFrontProgress = frontProgress;
         }
 
         const prevDistance = car.distanceTravelled;
@@ -2205,6 +2333,8 @@ function App() {
     let animationFrameId = 0;
     const clock = new THREE.Clock();
     let lastCountsTime = 0;
+    let lastMovementCheck = { time: 0, movingCars: 0 };
+    let deadlockRecoveryAttempts = 0;
 
     const animate = () => {
       animationFrameId = requestAnimationFrame(animate);
@@ -2220,6 +2350,47 @@ function App() {
       updateSignalPhase(now);
       updateRemainingTime(now);
       setSignalLights();
+
+      // Deadlock detection: Check if any cars are moving
+      if (now - lastMovementCheck.time > 2000) {
+        const movingCars = carsRef.current.filter(car => car.speed > 0.5).length;
+        const totalCars = carsRef.current.length;
+        
+        // If no cars moving for 4+ seconds and we have cars, force recovery
+        if (movingCars === 0 && totalCars > 0 && lastMovementCheck.movingCars === 0) {
+          console.log("[Deadlock Detection] No movement detected, forcing recovery...", deadlockRecoveryAttempts);
+          
+          // Force signal transition if stuck
+          const phase = signalPhaseRef.current;
+          if (phase === "CLEARING" || phase === "ALL_RED") {
+            // Force transition to GREEN for next direction
+            const currentDirectionIndex = SIGNAL_CYCLE_ORDER.indexOf(activeSignalRef.current);
+            cycleIndexRef.current = (currentDirectionIndex + 1) % SIGNAL_CYCLE_ORDER.length;
+            const nextDirection = SIGNAL_CYCLE_ORDER[cycleIndexRef.current];
+            desiredSignalRef.current = nextDirection;
+            previousSignalRef.current = nextDirection;
+            activeSignalRef.current = nextDirection;
+            greenDurationMsRef.current = calculateGreenDurationMs(nextDirection);
+            signalPhaseRef.current = "GREEN";
+            signalTransitionStartRef.current = now;
+            lastSignalChangeRef.current = now;
+            intersectionEmptySinceRef.current = now;
+            setTrafficData((prev) => ({
+              ...prev,
+              activeSignal: nextDirection,
+              phase: "GREEN",
+            }));
+          }
+          
+          // Reset intersection tracking to allow movement
+          intersectionCarsRef.current = [];
+          intersectionEmptySinceRef.current = now;
+          
+          deadlockRecoveryAttempts++;
+        }
+        
+        lastMovementCheck = { time: now, movingCars };
+      }
 
       const orbitRadius = 30;
       const orbitSpeed = 0.00012;
